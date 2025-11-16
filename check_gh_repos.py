@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 def check_gh_installed() -> bool:
@@ -70,6 +70,58 @@ def check_github_repo_exists(username: str, repo_name: str) -> bool:
         return False
 
 
+def get_authenticated_username() -> Optional[str]:
+    """Return the login of the authenticated GitHub CLI user, if available."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            login = result.stdout.strip()
+            return login or None
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+    return None
+
+
+def parse_paginated_json(output: str) -> List[Dict]:
+    """
+    Parse gh api --paginate output which concatenates JSON arrays.
+    Attempts regular JSON parsing first, then splits into lines.
+    """
+    output = output.strip()
+    if not output:
+        return []
+
+    try:
+        parsed = json.loads(output)
+        return parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        pass
+
+    repos: List[Dict] = []
+    normalized = output.replace("][", "]\n[")
+    for chunk in normalized.splitlines():
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            data = json.loads(chunk)
+        except json.JSONDecodeError as exc:
+            raise exc
+        if isinstance(data, list):
+            repos.extend(data)
+        else:
+            repos.append(data)
+
+    return repos
+
+
 def get_subdirectories(path: Path) -> List[Path]:
     """
     Get all immediate subdirectories in the given path.
@@ -98,59 +150,38 @@ def get_user_repos(username: str) -> List[Dict]:
         List of repository information dictionaries
     """
     try:
-        # Use gh api with --paginate to get all repos at once
-        result = subprocess.run(
-            ["gh", "api", "/user/repos", "--paginate"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        authenticated = get_authenticated_username()
+        endpoints = []
 
-        if result.returncode != 0:
-            # If that fails, try the public user endpoint
+        if authenticated and authenticated.lower() == username.lower():
+            endpoints.append("/user/repos")
+
+        endpoints.append(f"/users/{username}/repos")
+
+        errors = []
+
+        for endpoint in endpoints:
             result = subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    f"/users/{username}/repos",
-                    "--paginate",
-                ],
+                ["gh", "api", endpoint, "--paginate"],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
 
-            if result.returncode != 0:
-                print(f"✗ Error fetching repos: {result.stderr.strip()}")
-                return []
+            if result.returncode == 0:
+                try:
+                    return parse_paginated_json(result.stdout)
+                except json.JSONDecodeError as exc:
+                    print(f"✗ Error parsing repo data: {exc}")
+                    return []
 
-        # gh api --paginate returns concatenated JSON arrays (one per page)
-        # We need to parse them as separate JSON arrays
-        output = result.stdout.strip()
-        if not output:
-            return []
+            errors.append(result.stderr.strip())
 
-        repos = []
-        # Split on "][" to separate concatenated arrays, then fix brackets
-        if "][" in output:
-            # Multiple pages - split and parse each
-            parts = output.split("][")
-            for i, part in enumerate(parts):
-                # Add back the brackets that were removed by split
-                if i == 0:
-                    part = part + "]"
-                elif i == len(parts) - 1:
-                    part = "[" + part
-                else:
-                    part = "[" + part + "]"
-
-                page_repos = json.loads(part)
-                repos.extend(page_repos)
-        else:
-            # Single page
-            repos = json.loads(output)
-
-        return repos
+        print(
+            "✗ Error fetching repos: "
+            + " | ".join(msg for msg in errors if msg).strip()
+        )
+        return []
 
     except subprocess.TimeoutExpired:
         print("✗ Timeout fetching repos")
@@ -286,7 +317,6 @@ def print_summary(results: Dict[str, Dict], username: str, inverse: bool = False
                         else ""
                     )
                     print(f"  ✗ {repo_name}{desc}")
-                    print(f"    git clone {data['clone_url']}")
 
         if local_count > 0:
             print("\nAlready cloned locally:")
@@ -341,8 +371,8 @@ Note: Requires GitHub CLI (gh) to be installed and authenticated.
     parser.add_argument(
         "-u",
         "--username",
-        default="jwdeane",
-        help="GitHub username to check (default: jwdeane)",
+        default=None,
+        help="GitHub username to check (default: authenticated gh user)",
     )
     parser.add_argument(
         "-v",
@@ -373,6 +403,14 @@ Note: Requires GitHub CLI (gh) to be installed and authenticated.
         print("  gh auth login")
         sys.exit(1)
 
+    username = args.username or get_authenticated_username()
+    if not username:
+        print(
+            "Error: Could not determine GitHub username. "
+            "Provide one with -u/--username."
+        )
+        sys.exit(1)
+
     directory = Path(args.directory).resolve()
 
     if not directory.exists():
@@ -384,16 +422,16 @@ Note: Requires GitHub CLI (gh) to be installed and authenticated.
         sys.exit(1)
 
     if not args.quiet:
-        print(f"Directory: {directory} | User: {args.username}")
+        print(f"Directory: {directory} | User: {username}")
 
     if args.inverse:
         # Inverse mode: check what's on GitHub but not local
         results = check_missing_local(
-            directory, username=args.username, verbose=args.verbose and not args.quiet
+            directory, username=username, verbose=args.verbose and not args.quiet
         )
 
         if not args.quiet:
-            print_summary(results, args.username, inverse=True)
+            print_summary(results, username, inverse=True)
 
         # Exit with status code based on results
         # 0 if all repos are cloned, 1 if any are missing locally
@@ -402,11 +440,11 @@ Note: Requires GitHub CLI (gh) to be installed and authenticated.
     else:
         # Normal mode: check what's local but not on GitHub
         results = check_all_repos(
-            directory, username=args.username, verbose=args.verbose and not args.quiet
+            directory, username=username, verbose=args.verbose and not args.quiet
         )
 
         if not args.quiet:
-            print_summary(results, args.username, inverse=False)
+            print_summary(results, username, inverse=False)
 
         # Exit with status code based on results
         # 0 if all repos exist, 1 if any are missing
