@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+# accid - Cloudflare account id lookup
+#
+# Execute Cloudflare API calls authenticated via a cf-vault profile.
+# Automatically manages vault sessions and only authenticates when necessary.
+#
+# Usage:
+#   accid <zone_name>
+#
+# Examples:
+#   accid jwdeane.com                           # print account_id
+#
+# Features:
+#   - Leverage cfapi to lookup an account_id by zone (domain) name
+#
+# Dependencies:
+#   - cfapi: Cloudflare API request wrapper
+#   - jq: JSON parser
+set -euo pipefail
+
+BOLD='\033[1m'
+RED='\033[31m'
+GREEN='\033[32m'
+RESET='\033[0m'
+
+print_usage() {
+	echo "Usage: accid <zone_name>"
+	echo "       accid --help"
+}
+
+main() {
+	local vault_profile="${CLOUDFLARE_VAULT_SESSION:-global}"
+	local zone_name=""
+	local account_id=""
+	local response=""
+	local verbose=false
+
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--profile | -p)
+			vault_profile="$2"
+			shift 2
+			;;
+		--verbose | -v)
+			verbose=true
+			shift
+			;;
+		--help | -h)
+			print_usage
+			exit 0
+			;;
+		*)
+			if [[ -z "$zone_name" ]]; then
+				zone_name="$1"
+			else
+				echo -e "${BOLD}${RED}Error:${RESET} too many arguments" >&2
+				print_usage >&2
+				exit 1
+			fi
+			shift
+			;;
+		esac
+	done
+
+	if [[ -z "$zone_name" ]]; then
+		echo -e "${BOLD}${RED}Error:${RESET} missing zone_name" >&2
+		print_usage >&2
+		exit 1
+	fi
+
+	if ! command -v cfapi >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} cfapi command not found" >&2
+		exit 1
+	fi
+
+	if ! command -v jq >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} jq command not found" >&2
+		exit 1
+	fi
+
+	if ! command -v cf-vault >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} cf-vault command not found" >&2
+		exit 1
+	fi
+
+	if ! cf-vault list | awk 'NR>1 {print $1}' | grep -q "^$vault_profile$"; then
+		echo -e "${BOLD}${RED}Error:${RESET} profile ${BOLD}${GREEN}$vault_profile${RESET} not found in cf-vault" >&2
+		echo "Available profiles:" >&2
+		cf-vault list >&2
+		exit 1
+	fi
+
+	[[ "$verbose" == true ]] && echo -e "Looking up account_id for: ${BOLD}${GREEN}$zone_name${RESET}" >&2
+
+	if ! response=$(cfapi "zones?name=$zone_name&status=active" --profile "$vault_profile"); then
+		echo -e "${BOLD}${RED}Error:${RESET} API request failed for ${BOLD}${GREEN}$zone_name${RESET}" >&2
+		exit 1
+	fi
+
+	if ! printf '%s' "$response" | jq -e '.success' >/dev/null 2>&1; then
+		local error_msg
+		error_msg=$(printf '%s' "$response" | jq -r '.errors[]?.message // "Unknown API error"' 2>/dev/null | head -1)
+		echo -e "${BOLD}${RED}Error:${RESET} API error: $error_msg" >&2
+		[[ "$verbose" == true ]] && echo "$response" >&2
+		exit 1
+	fi
+
+	local result_count
+	result_count=$(printf '%s' "$response" | jq -r '.result | length' 2>/dev/null)
+	if [[ "$result_count" == "0" ]]; then
+		echo -e "${BOLD}${RED}Error:${RESET} zone ${BOLD}${GREEN}$zone_name${RESET} not found" >&2
+		exit 1
+	fi
+
+	[[ "$verbose" == true ]] && printf '%s' "$response" | jq '.result[] | {name: .name, account_id: .account.id}' >&2
+
+	account_id=$(printf '%s' "$response" | jq -r '.result[0].account.id' 2>/dev/null)
+
+	if [[ -z "$account_id" || "$account_id" == "null" ]]; then
+		echo -e "${BOLD}${RED}Error:${RESET} no account_id in response" >&2
+		[[ "$verbose" == true ]] && echo "Full response: $response" >&2
+		exit 1
+	fi
+
+	printf '%s\n' "$account_id"
+}
+
+main "$@"

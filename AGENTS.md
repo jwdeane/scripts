@@ -1,11 +1,12 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Scripts live at the repo root. Each script is self-contained Python executed via the uv shebang (`#!/usr/bin/env -S uv run --quiet -s`). `README.md` documents available tools; `AGENTS.md` captures contributor expectations. No auxiliary modules or fixtures directories—build utilities directly into each script.
+Scripts live at the repo root. Python utilities stay self-contained with the uv shebang (`#!/usr/bin/env -S uv run --quiet -s`) and keep their `.py` suffix; shell utilities are executable files without an extension. `README.md` documents available tools; `AGENTS.md` captures contributor expectations. No auxiliary modules or fixtures directories—build utilities directly into each script.
 
 ## Build & Development Commands
 - `./script_name.py ...` – Run any script directly; uv resolves dependencies on demand.
 - `ruff check --fix` – Lint and auto-fix Python files after every edit.
+- `shfmt -w <scripts>` and `shellcheck <scripts>` – Format and lint shell scripts before submitting changes.
 
 ## Coding Style & Naming Conventions
 - Stick to modern Python (3.11+) features when helpful; scripts already rely on pathlib and type hints.

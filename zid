@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+# zid - Cloudflare zone id lookup
+#
+# Execute Cloudflare API calls authenticated via a cf-vault profile.
+# Automatically manages vault sessions and only authenticates when necessary.
+#
+# Usage:
+#   zid <zone_name>
+#
+# Examples:
+#   zid jwdeane.com                                  # print zone_id
+#
+# Features:
+#   - Leverage cfapi to lookup an active zone_id by domain name
+#
+# Dependencies:
+#   - cfapi: Cloudflare API request wrapper
+#   - jq: JSON parser
+set -euo pipefail
+
+BOLD='\033[1m'
+RED='\033[31m'
+GREEN='\033[32m'
+RESET='\033[0m'
+
+print_usage() {
+	echo "Usage: zid <zone_name>"
+	echo "       zid --help"
+}
+
+main() {
+	local vault_profile="${CLOUDFLARE_VAULT_SESSION:-global}"
+	local zone_name=""
+	local zone_id=""
+	local response=""
+	local verbose=false
+
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--profile | -p)
+			vault_profile="$2"
+			shift 2
+			;;
+		--verbose | -v)
+			verbose=true
+			shift
+			;;
+		--help | -h)
+			print_usage
+			exit 0
+			;;
+		*)
+			if [[ -z "$zone_name" ]]; then
+				zone_name="$1"
+			else
+				echo -e "${BOLD}${RED}Error:${RESET} too many arguments" >&2
+				print_usage >&2
+				exit 1
+			fi
+			shift
+			;;
+		esac
+	done
+
+	if [[ -z "$zone_name" ]]; then
+		echo -e "${BOLD}${RED}Error:${RESET} missing zone_name" >&2
+		print_usage >&2
+		exit 1
+	fi
+
+	if ! command -v cfapi >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} cfapi command not found" >&2
+		exit 1
+	fi
+
+	if ! command -v jq >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} jq command not found" >&2
+		exit 1
+	fi
+
+	if ! command -v cf-vault >/dev/null 2>&1; then
+		echo -e "${BOLD}${RED}Error:${RESET} cf-vault command not found" >&2
+		exit 1
+	fi
+
+	if ! cf-vault list | awk 'NR>1 {print $1}' | grep -q "^$vault_profile$"; then
+		echo -e "${BOLD}${RED}Error:${RESET} profile ${BOLD}${GREEN}$vault_profile${RESET} not found in cf-vault" >&2
+		echo "Available profiles:" >&2
+		cf-vault list >&2
+		exit 1
+	fi
+
+	[[ "$verbose" == true ]] && echo -e "Looking up zone_id for: ${BOLD}${GREEN}$zone_name${RESET}" >&2
+
+	if ! response=$(cfapi "zones?name=$zone_name&status=active" --profile "$vault_profile"); then
+		echo -e "${BOLD}${RED}Error:${RESET} cfapi request failed" >&2
+		exit 1
+	fi
+
+	zone_id=$(printf '%s' "$response" | jq -r ' if (.success and (.result|length>0)) then .result[0].id else "" end')
+
+	if [[ -z "$zone_id" ]]; then
+		echo -e "${BOLD}${RED}Error:${RESET} no active zone_id found for '$zone_name'" >&2
+		exit 1
+	fi
+
+	printf '%s\n' "$zone_id"
+}
+
+main "$@"
