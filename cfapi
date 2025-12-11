@@ -38,23 +38,28 @@ GREEN='\033[32m'
 RESET='\033[0m'
 
 print_usage() {
-	echo "Usage: cfapi [--profile <profile>] [--verbose] <endpoint> [curl options]"
+	echo "Usage: cfapi [--profile <profile>] [--silent] [--verbose] <endpoint> [curl options]"
 	echo "       cfapi --help"
 }
 
 main() {
-	local endpoint=""
-	local vault_profile="${CLOUDFLARE_VAULT_SESSION:-global}"
 	local api_base_url="${CF_API_BASE_URL:-https://api.cloudflare.com/client/v4}"
-	local verbose=false
 	local curl_args=()
 	local curl_args_escaped=""
+	local endpoint=""
+	local silent=false
+	local vault_profile="${CLOUDFLARE_VAULT_SESSION:-global}"
+	local verbose=false
 
 	while [[ $# -gt 0 ]]; do
 		case $1 in
 		--profile | -p)
 			vault_profile="$2"
 			shift 2
+			;;
+		--silent | -s)
+			silent=true
+			shift
 			;;
 		--verbose | -v)
 			verbose=true
@@ -100,7 +105,7 @@ main() {
 		exit 1
 	fi
 
-	echo -e "Using profile: ${BOLD}${GREEN}$vault_profile${RESET}" >&2
+	[[ "$silent" == false ]] && echo -e "Using profile: ${BOLD}${GREEN}$vault_profile${RESET}" >&2
 
 	[[ "$verbose" == true ]] && echo -e "Authentication type: ${BOLD}${GREEN}$auth_type${RESET}" >&2
 
